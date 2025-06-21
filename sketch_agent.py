@@ -173,8 +173,8 @@ class LLMOpenAI:
 You can help the user by executing commands and interpreting the results.
 Be careful with destructive commands and always explain what you're doing.
 You have access to the bash tool which allows you to run shell commands."""
-        # Re‑use the same bash_tool specification
-        self.tools = [bash_tool]
+        # OpenAI requires each tool to be wrapped with {"type": "function", "function": ...}
+        self.tools = [{ "type": "function", "function": bash_tool }]
 
     def __call__(self, content):
         # Convert Anthropics rich content list → plain user text
