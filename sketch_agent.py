@@ -8,6 +8,7 @@
 # /// script
 # dependencies = [
 #   "anthropic>=0.45.0",
+#   "openai>=1.24.0",
 # ]
 # ///
 import os
@@ -15,6 +16,8 @@ import subprocess
 from typing import Dict, List, Any, Optional, Tuple, Union
 
 import anthropic
+import openai
+import json
 
 
 
@@ -25,7 +28,12 @@ def main():
     try:
         print("\n=== LLM Agent Loop with Claude and Bash Tool ===\n")
         print("Type 'exit' to end the conversation.\n")
-        loop(LLM("claude-3-7-sonnet-latest"))
+        provider = os.getenv("MODEL_PROVIDER", "anthropic").lower()
+        if provider == "openai":
+            model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            loop(LLMOpenAI(model_name))
+        else:
+            loop(LLM("claude-3-7-sonnet-latest"))
     except KeyboardInterrupt:
         print("\n\nExiting. Goodbye!")
     except Exception as e:
@@ -149,6 +157,60 @@ class LLM:
         return output_text, tool_calls
 
 
+class LLMOpenAI:
+    """
+    OpenAI‑based drop‑in replacement for the Anthropic‑backed LLM.
+    It expects an environment variable OPENAI_API_KEY and supports the same
+    bash tool interface.
+    """
+    def __init__(self, model: str):
+        if "OPENAI_API_KEY" not in os.environ:
+            raise ValueError("OPENAI_API_KEY environment variable not found.")
+        openai.api_key = os.environ["OPENAI_API_KEY"]
+        self.model = model
+        self.messages = []
+        self.system_prompt = """You are a helpful AI assistant with access to bash commands.
+You can help the user by executing commands and interpreting the results.
+Be careful with destructive commands and always explain what you're doing.
+You have access to the bash tool which allows you to run shell commands."""
+        # Re‑use the same bash_tool specification
+        self.tools = [bash_tool]
+
+    def __call__(self, content):
+        # Convert Anthropics rich content list → plain user text
+        user_text = " ".join(
+            part["text"] for part in content if isinstance(part, dict) and part.get("type") == "text"
+        )
+        self.messages.append({"role": "user", "content": user_text})
+
+        # Call OpenAI Chat Completions with tool support
+        response = openai.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "system", "content": self.system_prompt}] + self.messages,
+            tools=self.tools,
+            temperature=0.7
+        )
+
+        assistant_msg = response.choices[0].message
+        output_text = assistant_msg.content or ""
+        tool_calls = []
+
+        # Parse tool calls (if any)
+        if getattr(assistant_msg, "tool_calls", None):
+            for tc in assistant_msg.tool_calls:
+                tool_calls.append(
+                    {
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "input": json.loads(tc.function.arguments or "{}"),
+                    }
+                )
+
+        # Keep full assistant message history for context
+        self.messages.append(assistant_msg.to_dict())
+        return output_text, tool_calls
+
+
 
 # In[ ]:
 
@@ -177,4 +239,3 @@ def handle_tool_call(tool_call):
 
 if __name__ == "__main__":
     main()
-
