@@ -45,14 +45,22 @@ def main():
 
 
 def loop(llm):
-    msg = user_input()
+    provider = getattr(llm, "provider", "anthropic")
+    msg = user_input()            # first user msg
     while True:
+        # ① assistant responds
         output, tool_calls = llm(msg)
-        print("Agent: ", output)
+        if output:
+            print("Agent: ", output)
+
+        # ② if assistant called tools → run them & feed results back
         if tool_calls:
-            msg = [ handle_tool_call(tc) for tc in tool_calls ]
-        else:
-            msg = user_input()
+            tool_results = [handle_tool_call(tc, provider) for tc in tool_calls]
+            # Immediately send tool results back to the LLM
+            msg = tool_results
+            continue              # repeat loop without new user input
+        # ③ no tool calls → ask user again
+        msg = user_input()
 
 
 
@@ -118,6 +126,7 @@ class LLM:
             raise ValueError("ANTHROPIC_API_KEY environment variable not found.")
         self.client = anthropic.Anthropic()
         self.model = model
+        self.provider = "anthropic"
         self.messages = []
         self.system_prompt = """You are a helpful AI assistant with access to bash commands.
         You can help the user by executing commands and interpreting the results.
@@ -168,6 +177,7 @@ class LLMOpenAI:
             raise ValueError("OPENAI_API_KEY environment variable not found.")
         openai.api_key = os.environ["OPENAI_API_KEY"]
         self.model = model
+        self.provider = "openai"
         self.messages = []
         self.system_prompt = """You are a helpful AI assistant with access to bash commands.
 You can help the user by executing commands and interpreting the results.
@@ -177,11 +187,17 @@ You have access to the bash tool which allows you to run shell commands."""
         self.tools = [{ "type": "function", "function": bash_tool }]
 
     def __call__(self, content):
-        # Convert Anthropics rich content list → plain user text
-        user_text = " ".join(
-            part["text"] for part in content if isinstance(part, dict) and part.get("type") == "text"
-        )
-        self.messages.append({"role": "user", "content": user_text})
+        # Detect whether `content` is (a) list of {type:'text'} parts
+        #      → user input, or (b) list of {role:'tool', ...} messages.
+        if content and isinstance(content, list) and "role" in content[0]:
+            # tool result messages; just extend history
+            self.messages.extend(content)
+        else:
+            user_text = " ".join(
+                part["text"] for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+            self.messages.append({"role": "user", "content": user_text})
 
         # Call OpenAI Chat Completions with tool support
         response = openai.chat.completions.create(
@@ -215,7 +231,7 @@ You have access to the bash tool which allows you to run shell commands."""
 # In[ ]:
 
 
-def handle_tool_call(tool_call):
+def handle_tool_call(tool_call, provider="anthropic"):
     if tool_call["name"] != "bash":
         raise Exception(f"Unsupported tool: {tool_call['name']}")
 
@@ -223,14 +239,20 @@ def handle_tool_call(tool_call):
     print(f"Executing bash command: {command}")
     output_text = execute_bash(command)
     print(f"Bash output:\n{output_text}")
-    return dict(
-        type="tool_result",
-        tool_use_id=tool_call["id"],
-        content=[dict(
-            type="text",
-            text=output_text
-        )]
-    )
+
+    if provider == "openai":
+        # OpenAI expects a role='tool' message referencing the call id
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call["id"],
+            "content": output_text
+        }
+    else:  # Anthropic
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_call["id"],
+            "content": [ { "type": "text", "text": output_text } ]
+        }
 
 
 
